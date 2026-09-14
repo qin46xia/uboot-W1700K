@@ -256,7 +256,11 @@
 
 #define AIROHA_RECOVERY_SWITCH_CPU_PORT 6
 #define AIROHA_RECOVERY_LAN_FLAP_MIN_MS 1500
-#define AIROHA_RECOVERY_LAN_UP_SETTLE_MS 700
+/*
+ * The LAN PHYs restart auto-negotiation on power-up and take roughly 1-3 s to
+ * come back. Keep the default above that window; recovery_lan_up_ms overrides.
+ */
+#define AIROHA_RECOVERY_LAN_UP_SETTLE_MS 2000
 #define AIROHA_RECOVERY_SWITCH_DOWN_SETTLE_MS 50
 #define AIROHA_RECOVERY_FDB_MOVE_FLUSH_MS 500
 #define AIROHA_RECOVERY_LINK_POLL_MS 1000
@@ -4464,8 +4468,14 @@ void airoha_recovery_restart_links(struct udevice *dev)
 	}
 	mdelay(down_ms);
 
+	/*
+	 * Wait for the LAN PHYs to settle after power-up. The caller returns
+	 * straight into the recovery loop, so without this delay the first
+	 * DHCP replies go out while the PHYs are still auto-negotiating and
+	 * never reach the client; the host then has to retry DISCOVER.
+	 */
 	if (lan_cycle)
-		airoha_recovery_lan_phy_set_power(eth, true, false);
+		airoha_recovery_lan_phy_set_power(eth, true, true);
 	if (phy5_cycle) {
 		ret = airoha_recovery_rtl8261_set_power(eth, RTL8261_PHY5_ADDR, true);
 		if (ret) {
