@@ -4,10 +4,12 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 UBOOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+BOARD="${5:-w1700k}"
+
 PREFIX_SHIM="$SCRIPT_DIR/chainloader-prefix-shim.uImage"
 SHIM="$SCRIPT_DIR/chainloader-shim.bin"
 DTB="$SCRIPT_DIR/chainloader-control.dtb"
-TEMPLATE="$SCRIPT_DIR/xr1710g-chainloader.its.in"
+TEMPLATE="$SCRIPT_DIR/chainloader.its.in"
 
 PAYLOAD="$(realpath "${1:-$UBOOT_DIR/u-boot.bin}")"
 OUTPUT_DIR="$(realpath -m "${2:-$UBOOT_DIR/out}")"
@@ -26,22 +28,23 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 
-OUTPUT_FIT="$OUTPUT_DIR/xr1710g-chainloader.itb"
-OUTPUT_SLOT="$OUTPUT_DIR/xr1710g-chainloader-slot.bin"
+OUTPUT_FIT="$OUTPUT_DIR/${BOARD}-chainloader.itb"
+OUTPUT_SLOT="$OUTPUT_DIR/${BOARD}-chainloader-slot.bin"
 
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-ITS="$TMPDIR/xr1710g-chainloader.its"
+ITS="$TMPDIR/${BOARD}-chainloader.its"
 
 sed \
+  -e "s|__BOARD__|$BOARD|g" \
   -e "s|__DTB__|$DTB|g" \
   -e "s|__SHIM__|$SHIM|g" \
   -e "s|__PAYLOAD__|$PAYLOAD|g" \
   -e "s|__KCOMP__|none|g" \
   "$TEMPLATE" > "$ITS"
 
-echo "Building FIT image..."
+echo "Building FIT image (board: $BOARD)..."
 "$MKIMAGE" -f "$ITS" "$OUTPUT_FIT"
 "$DUMPIMAGE" -l "$OUTPUT_FIT"
 

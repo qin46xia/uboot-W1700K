@@ -1,0 +1,257 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/dts-v1/;
+
+/* Bootloader installs ATF here */
+/memreserve/ 0x80000000 0x200000;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/leds/common.h>
+#include "en7581.dtsi"
+
+/ {
+	model = "Gemtek W1700K (UBI)";
+	compatible = "gemtek,w1700k", "gemtek,w1700k-ubi",
+		     "airoha,an7581", "airoha,en7581";
+	recovery-gpios = <&en7581_pinctrl 0 GPIO_ACTIVE_LOW>;
+	recovery-green-led-gpios = <&en7581_pinctrl 9 GPIO_ACTIVE_LOW>,
+				   <&en7581_pinctrl 27 GPIO_ACTIVE_LOW>;
+	recovery-yellow-led-gpios = <&en7581_pinctrl 10 GPIO_ACTIVE_LOW>,
+				    <&en7581_pinctrl 28 GPIO_ACTIVE_LOW>;
+
+	aliases {
+		serial0 = &uart1;
+		led-boot = &led_status_red;
+		led-failsafe = &led_status_blue;
+		led-upgrade = &led_status_blue;
+		led-running = &led_status_green;
+	};
+
+	chosen {
+		rootdisk = <&ubi_rootfs>;
+		bootargs = "console=ttyS0,115200 earlycon ubi.block=0,fit root=/dev/fit0 rootwait";
+		stdout-path = "serial0:115200n8";
+		linux,usable-memory-range = <0x0 0x80200000 0x0 0x7fe00000>;
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x80000000>;
+	};
+
+	keys {
+		compatible = "gpio-keys";
+
+		key-restart {
+			label = "reset";
+			gpios = <&en7581_pinctrl 0 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_RESTART>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led_status_green: led-status-green {
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&en7581_pinctrl 17 GPIO_ACTIVE_LOW>;
+		};
+
+		led_status_blue: led-status-blue {
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&en7581_pinctrl 19 GPIO_ACTIVE_LOW>;
+		};
+
+		led_status_red: led-status-red {
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&en7581_pinctrl 29 GPIO_ACTIVE_LOW>;
+			default-state = "on";
+		};
+
+		led_status_white: led-status-white {
+			color = <LED_COLOR_ID_WHITE>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&en7581_pinctrl 20 GPIO_ACTIVE_LOW>;
+		};
+
+		led_lan3_green: led-lan3-green {
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_LAN;
+			function-enumerator = <3>;
+			gpios = <&en7581_pinctrl 9 GPIO_ACTIVE_LOW>;
+		};
+
+		led_lan3_yellow: led-lan3-yellow {
+			color = <LED_COLOR_ID_YELLOW>;
+			function = LED_FUNCTION_LAN;
+			function-enumerator = <3>;
+			gpios = <&en7581_pinctrl 10 GPIO_ACTIVE_LOW>;
+		};
+
+		led_lan4_green: led-lan4-green {
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_LAN;
+			function-enumerator = <4>;
+			gpios = <&en7581_pinctrl 27 GPIO_ACTIVE_LOW>;
+		};
+
+		led_lan4_yellow: led-lan4-yellow {
+			color = <LED_COLOR_ID_YELLOW>;
+			function = LED_FUNCTION_LAN;
+			function-enumerator = <4>;
+			gpios = <&en7581_pinctrl 28 GPIO_ACTIVE_LOW>;
+		};
+	};
+};
+
+&en7581_pinctrl {
+	gpio-ranges = <&en7581_pinctrl 0 13 50>;
+
+	mdio_pins: mdio-pins {
+		mux {
+			function = "mdio";
+			groups = "mdio";
+		};
+
+		conf {
+			pins = "gpio2";
+			output-high;
+		};
+	};
+
+	pcie0_rst_pins: pcie0-rst-pins {
+		conf {
+			pins = "pcie_reset0";
+			drive-open-drain = <1>;
+		};
+	};
+};
+
+&spi_nand {
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		partition@0 {
+			label = "vendor";
+			reg = <0x00000000 0x00600000>;
+			read-only;
+		};
+
+		partition@600000 {
+			label = "chainloader";
+			reg = <0x00600000 0x00100000>;
+			read-only;
+		};
+
+		partition@700000 {
+			label = "ubi";
+			reg = <0x00700000 0x1b700000>;
+			compatible = "linux,ubi";
+
+			volumes {
+				ubi-volume-ubootenv {
+					volname = "ubootenv";
+
+					nvmem-layout {
+						compatible = "u-boot,env-redundant-bool";
+					};
+				};
+
+				ubi-volume-ubootenv2 {
+					volname = "ubootenv2";
+
+					nvmem-layout {
+						compatible = "u-boot,env-redundant-bool";
+					};
+				};
+
+				ubi-volume-uboot {
+					volname = "uboot";
+				};
+
+				ubi_rootfs: ubi-volume-fit {
+					volname = "fit";
+				};
+
+				ubi_factory: ubi-volume-factory {
+					volname = "factory";
+				};
+			};
+		};
+
+		/*
+		 * Compatibility views for older W1700K UBI layouts (same scheme
+		 * as the XR1710G). All three partitions start at the same
+		 * offset; software must select exactly one view before
+		 * attaching UBI.
+		 */
+		partition-ubi15@700000 {
+			label = "ubi1.5";
+			reg = <0x00700000 0x1d9c0000>;
+		};
+
+		partition-ubi10@700000 {
+			label = "ubi1.0";
+			reg = <0x00700000 0x1f700000>;
+		};
+
+		/*
+		 * Reserve the final 528 128 KiB eraseblocks (66 MiB) for
+		 * the vendor bootloader's BMT/BBT handling on SPI-NAND.
+		 */
+		reserved_bmt@1be00000 {
+			label = "reserved_bmt";
+			reg = <0x1be00000 0x04200000>;
+			read-only;
+		};
+	};
+};
+
+&ubi_factory {
+	nvmem-layout {
+		compatible = "fixed-layout";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		eeprom: eeprom@0 {
+			reg = <0x0 0x1e00>;
+		};
+
+		wan_mac: macaddr@5000 {
+			reg = <0x5000 0x6>;
+		};
+
+		lan_mac: macaddr@6000 {
+			compatible = "mac-base";
+			reg = <0x6000 0x6>;
+			#nvmem-cell-cells = <1>;
+		};
+	};
+};
+
+&i2c0 {
+	status = "okay";
+};
+
+&pcie0 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcie0_rst_pins>;
+};
+
+&eth {
+	status = "okay";
+};
+
+&gdm1 {
+	status = "okay";
+};

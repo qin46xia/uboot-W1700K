@@ -39,7 +39,7 @@
 #include <lwip/prot/dhcp.h>
 #include <lwip/prot/iana.h>
 #include <version.h>
-#include <xr1710g_version.h>
+#include <an7581_recovery_version.h>
 #include <timestamp.h>
 #include <limits.h>
 #include <miiphy.h>
@@ -87,6 +87,7 @@ const char *xr1710g_detect_ubi_version(void);
 #define RECOVERY_STATUS_BREATHE_PERIOD_MS 1800
 #define RECOVERY_STATUS_BREATHE_HALF_MS   (RECOVERY_STATUS_BREATHE_PERIOD_MS / 2)
 #define RECOVERY_STATUS_SWEEP_STEP_MS     700
+#define RECOVERY_STATUS_CUE_STEP_MS       200
 #define RECOVERY_STATUS_OVERLAP_FP        (2 * 256)
 #define RECOVERY_STATUS_BRIGHTNESS_FP     256
 #define RECOVERY_STATUS_BREATHE_MIN_FP    64
@@ -249,6 +250,7 @@ struct recovery_gpio_pin {
 	struct gpio_desc desc;
 	ofnode node;
 	u8 gpio;
+	u8 color;
 	s8 last_on;
 	bool active_low;
 	bool valid;
@@ -257,6 +259,7 @@ struct recovery_gpio_pin {
 struct recovery_status_led_ctrl {
 	struct recovery_gpio_pin leds[RECOVERY_STATUS_LED_MAX];
 	int led_count;
+	int solid_idx;
 	ulong start_ms;
 	ulong last_pwm_update;
 	u32 pwm_mux_mask;
@@ -280,8 +283,24 @@ struct recovery_dhcp_server {
 };
 
 static const int recovery_led_phy_addrs[RECOVERY_LED_PORTS] = { 9, 10 };
-static const u8 recovery_green_led_gpios[RECOVERY_LED_PORTS] = { 43, 44 };
-static const u8 recovery_yellow_led_gpios[RECOVERY_LED_PORTS] = { 33, 34 };
+/* Per-board LAN LEDs. Defaults are the XR1710G LAN1/LAN2 lines. */
+static u8 recovery_green_led_gpios[RECOVERY_LED_PORTS] = { 43, 44 };
+static u8 recovery_yellow_led_gpios[RECOVERY_LED_PORTS] = { 33, 34 };
+
+static void recovery_led_gpios_init(void)
+{
+	/*
+	 * W1700K exposes its two switch-port LEDs on GPIO 9/10 (lan3) and
+	 * 27/28 (lan4) instead of the XR1710G lan1/lan2 lines (43/44, 33/34).
+	 */
+	if (of_machine_is_compatible("gemtek,w1700k") ||
+	    of_machine_is_compatible("gemtek,w1700k-ubi")) {
+		recovery_green_led_gpios[0] = 9;
+		recovery_green_led_gpios[1] = 27;
+		recovery_yellow_led_gpios[0] = 10;
+		recovery_yellow_led_gpios[1] = 28;
+	}
+}
 
 static void recovery_led_ctrl_free(struct recovery_led_ctrl *ctrl)
 {
@@ -628,6 +647,7 @@ static int recovery_status_led_init(struct recovery_status_led_ctrl *ctrl)
 	int i, keep = 0;
 
 	memset(ctrl, 0, sizeof(*ctrl));
+	ctrl->solid_idx = -1;
 
 	leds = ofnode_path("/leds");
 	if (ofnode_valid(leds)) {
@@ -639,8 +659,11 @@ static int recovery_status_led_init(struct recovery_status_led_ctrl *ctrl)
 			if (!function || strcmp(function, "status"))
 				continue;
 
-			if (!recovery_led_node_to_gpio(node, &pin))
+			if (!recovery_led_node_to_gpio(node, &pin)) {
+				/* LED_COLOR_ID_BLUE == 3 in dt-bindings/leds */
+				pin.color = ofnode_read_u32_default(node, "color", 0);
 				recovery_status_led_add(ctrl, &pin);
+			}
 		}
 	}
 
@@ -769,6 +792,41 @@ static void recovery_status_led_poll(struct recovery_status_led_ctrl *ctrl)
 	if (!ctrl->led_count)
 		return;
 
+	/*
+	 * While recovery is idle, hold a steady colour (blue on RGB boards) so
+	 * "recovery is running" is unmistakable. The sweep is kept for the
+	 * erase/write phases, where it doubles as a progress indicator.
+	 */
+	if (ctrl->solid_idx >= 0 && prog_phase == 0) {
+		if (ctrl->hw_pwm) {
+			recovery_status_led_hw_pwm_stop(ctrl);
+			ctrl->hw_pwm = false;
+		}
+		for (i = 0; i < ctrl->led_count; i++)
+			recovery_status_led_set(&ctrl->leds[i], i == ctrl->solid_idx);
+
+		if (env_get("recovery_debug")) {
+			static ulong dbg_ms;
+			ulong now = get_timer(0);
+
+			if (!dbg_ms || now - dbg_ms >= 5000) {
+				dbg_ms = now;
+				printf("recovery led: solid=%d count=%d data0=%08x\n",
+				       ctrl->solid_idx, ctrl->led_count,
+				       readl((void __iomem *)
+					     recovery_gpio_data_reg(17)));
+				for (i = 0; i < ctrl->led_count; i++)
+					printf(" gpio%u(color=%u,al=%d):%s",
+					       ctrl->leds[i].gpio,
+					       ctrl->leds[i].color,
+					       ctrl->leds[i].active_low,
+					       i == ctrl->solid_idx ? "ON" : "off");
+				printf("\n");
+			}
+		}
+		return;
+	}
+
 	now = get_timer(0);
 	elapsed = now - ctrl->start_ms;
 	if (ctrl->hw_pwm) {
@@ -814,6 +872,110 @@ static void recovery_status_led_stop(struct recovery_status_led_ctrl *ctrl)
 
 	for (i = 0; i < ctrl->led_count; i++)
 		recovery_status_led_set(&ctrl->leds[i], 0);
+}
+
+/*
+ * Boot-time recovery cue.
+ *
+ * board_late_init() samples the reset button before the slow NAND work, but
+ * without visual feedback a user cannot tell when to press it. These helpers
+ * drive the status LEDs in an unmistakable RGB chase while the button is
+ * polled, so "hold reset during the colour chase" is the documented way into
+ * the recovery web UI. The pattern is deliberately different from the smooth
+ * sweep used once recovery is running.
+ */
+static struct recovery_status_led_ctrl recovery_boot_cue_ctrl;
+static bool recovery_boot_cue_active;
+
+int recovery_status_leds_cue_begin(void)
+{
+	int ret;
+
+	if (recovery_boot_cue_active)
+		return 0;
+
+	ret = recovery_status_led_init(&recovery_boot_cue_ctrl);
+	if (ret)
+		return ret;
+
+	recovery_boot_cue_active = true;
+	return 0;
+}
+
+void recovery_status_leds_cue_poll(void)
+{
+	struct recovery_status_led_ctrl *ctrl = &recovery_boot_cue_ctrl;
+	ulong elapsed;
+	int idx, i;
+
+	if (!recovery_boot_cue_active)
+		return;
+
+	elapsed = get_timer(0) - ctrl->start_ms;
+	idx = (elapsed / RECOVERY_STATUS_CUE_STEP_MS) % ctrl->led_count;
+
+	/* The chase needs per-LED control, so drop the shared hardware PWM. */
+	if (ctrl->hw_pwm) {
+		recovery_status_led_hw_pwm_stop(ctrl);
+		ctrl->hw_pwm = false;
+	}
+
+	for (i = 0; i < ctrl->led_count; i++)
+		recovery_status_led_set(&ctrl->leds[i], i == idx);
+}
+
+void recovery_status_leds_cue_end(void)
+{
+	if (!recovery_boot_cue_active)
+		return;
+
+	recovery_boot_cue_active = false;
+	recovery_status_led_stop(&recovery_boot_cue_ctrl);
+	recovery_status_led_release(&recovery_boot_cue_ctrl);
+}
+
+void recovery_status_leds_cue_all(bool on)
+{
+	struct recovery_status_led_ctrl *ctrl = &recovery_boot_cue_ctrl;
+	int i;
+
+	if (!recovery_boot_cue_active)
+		return;
+
+	if (ctrl->hw_pwm) {
+		recovery_status_led_hw_pwm_stop(ctrl);
+		ctrl->hw_pwm = false;
+	}
+
+	for (i = 0; i < ctrl->led_count; i++)
+		recovery_status_led_set(&ctrl->leds[i], on);
+}
+
+/*
+ * Acknowledge the reset press at once: hold the recovery colour (blue) from
+ * the moment the button is seen, so there is no dark gap while the recovery
+ * brings up Ethernet and the web server.
+ */
+void recovery_status_leds_cue_blue(void)
+{
+	struct recovery_status_led_ctrl *ctrl = &recovery_boot_cue_ctrl;
+	int blue = -1;
+	int i;
+
+	if (!recovery_boot_cue_active)
+		return;
+
+	if (ctrl->hw_pwm) {
+		recovery_status_led_hw_pwm_stop(ctrl);
+		ctrl->hw_pwm = false;
+	}
+
+	for (i = 0; i < ctrl->led_count; i++)
+		if (ctrl->leds[i].color == 3)
+			blue = i;
+
+	for (i = 0; i < ctrl->led_count; i++)
+		recovery_status_led_set(&ctrl->leds[i], i == blue);
 }
 
 enum recovery_dhcp_request_verdict {
@@ -1223,6 +1385,7 @@ static int recovery_led_init(struct recovery_led_ctrl *ctrl)
 	ofnode mdio_node;
 	int i, ret;
 
+	recovery_led_gpios_init();
 	memset(ctrl, 0, sizeof(*ctrl));
 
 	/* Make sure PHY LED mux is disabled so software can own the lines. */
@@ -1749,7 +1912,7 @@ static int recovery_validate_uboot_slot_image(const void *image, size_t size)
 	    fit_magic != RECOVERY_FDT_MAGIC) {
 		printf("Invalid U-Boot slot image: magic[0]=0x%08x magic[0x%04x]=0x%08x\n",
 		       prefix_magic, RECOVERY_UBOOT_SLOT_FIT_OFFSET, fit_magic);
-		printf("Expected xr1710g-chainloader-slot.bin, not u-boot.bin or bare .itb\n");
+		printf("Expected <board>-chainloader-slot.bin, not u-boot.bin or bare .itb\n");
 		return -EINVAL;
 	}
 
@@ -2683,13 +2846,13 @@ int fs_open_custom(struct fs_file *file, const char *name)
 	            snprintf(json, sizeof(json),
 	                     "{\"u_boot\":\"%s (%s - %s %s)\",\"recovery_version\":\"%s\",\"credit\":\"%s\",\"detected_layout\":\"%s\"}\n",
 	                     U_BOOT_VERSION, U_BOOT_DATE, U_BOOT_TIME, U_BOOT_TZ,
-	                     XR1710G_RELEASE_VERSION, XR1710G_RELEASE_CREDIT,
+	                     AN7581_RELEASE_VERSION, AN7581_RELEASE_CREDIT,
 	                     xr1710g_detect_ubi_version());
 #else
 	            snprintf(json, sizeof(json),
 	                     "{\"u_boot\":\"%s\",\"recovery_version\":\"%s\",\"credit\":\"%s\",\"detected_layout\":\"%s\"}\n",
-	                     U_BOOT_VERSION, XR1710G_RELEASE_VERSION,
-	                     XR1710G_RELEASE_CREDIT,
+	                     U_BOOT_VERSION, AN7581_RELEASE_VERSION,
+	                     AN7581_RELEASE_CREDIT,
 	                     xr1710g_detect_ubi_version());
 #endif
         if (json_len < 0)
@@ -3199,7 +3362,20 @@ int run_http_recovery(void)
 	memset(&leds, 0, sizeof(leds));
 	rc = recovery_status_led_init(&status_leds);
 	if (!rc) {
+		int i;
+
 		use_status_leds = true;
+		/* Steady blue = "recovery is running" on RGB status LEDs. */
+		for (i = 0; i < status_leds.led_count; i++)
+			if (status_leds.leds[i].color == 3)
+				status_leds.solid_idx = i;
+
+		/*
+		 * Light the recovery colour immediately: the Ethernet/UBI setup
+		 * below takes seconds, and a dark status LED in that window is
+		 * easily mistaken for "the button press did nothing".
+		 */
+		recovery_status_led_poll(&status_leds);
 	} else {
 		printf("Recovery status LEDs unavailable (%d), fallback to link LEDs\n",
 		       rc);

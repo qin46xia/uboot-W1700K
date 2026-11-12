@@ -1,6 +1,24 @@
-# XR1710G U-Boot (Fork with DHCP Fix & CI Build)
+# W1700K U-Boot (AN7581 HTTP Recovery)
 
-> **Fork by** [naoki66](https://github.com/naoki66) · **Original project** by [YYH2913](https://github.com/YYH2913/http-uboot) · **Original release** [260712](https://github.com/YYH2913/http-uboot/releases/tag/260712)
+> **Based on** [naoki66](https://github.com/naoki66/XR1710G-http-uboot) / [YYH2913](https://github.com/YYH2913/http-uboot)
+
+## W1700K support
+
+The same AN7581 platform family also includes the Gemtek W1700K (CenturyLink /
+Lumen / Quantum Fiber). This repository builds HTTP-recovery U-Boot for both
+boards from the same tree:
+
+- `make an7581_w1700k_defconfig` — Gemtek W1700K (default)
+- `make xr1710g_defconfig` — Brightspeed XR1710G
+
+The W1700K build shares the recovery stack (lwIP HTTP server, RTL8261 10G
+training, chainloader packaging) and only swaps the board device tree, default
+environment and the recovery LAN LED GPIO mapping. CI (`build.yml`) accepts a
+`board` input (`xr1710g` or `w1700k`) and names the artifacts
+`<board>-uboot-<date>-g<commit>-flash-slot.bin` / `-chainloader.itb`.
+
+Companion firmware: [ImmortalWrt-for-Gemtek-XR1710G](https://github.com/naoki66/ImmortalWrt-for-Gemtek-XR1710G)
+(currently configured to build the `gemtek_w1700k-ubi` image).
 
 ## 捐赠 / Donate
 
@@ -31,6 +49,98 @@ Added `.github/workflows/build.yml` for on-demand compilation and release publis
 
 Added `mock_server.py` for previewing and debugging the HTTP recovery UI locally without hardware.
 
+### 4. Recovery Entry Window with LED Cue
+
+**Problem**: recovery could only be entered by holding `reset` while the
+chainloader started. Nothing told the user when to press the button, and
+`board_late_init()` sampled the button only once before the (slow) NAND/UBI
+work, so the usable window was a few hundred milliseconds wide.
+
+**Design**: the chainloader now opens a visible recovery window before any
+NAND/UBI work:
+
+1. The status LEDs chase through their colour channels - one channel lit at a
+   time, 200 ms per step (W1700K RGBW status LED: red → green → blue → white).
+2. The reset button is polled every 20 ms for the whole window (default
+   3000 ms, see `recovery_window_ms` below).
+3. Pressing it once starts the web recovery immediately, and the status LED
+   turns blue at that very moment - before the web server is reachable.
+   While recovery is idle it stays a steady blue, and it switches to the
+   colour sweep while an image is being erased or written.
+4. No press → the LEDs flash three times ("window missed") and the normal
+   boot continues.
+
+**Tuning and fallbacks**
+
+- `recovery_window_ms` (U-Boot env): window length in ms, default `3000`.
+  Setting `0` disables the cue and restores the previous single-sample
+  behaviour.
+- `recovery_trigger` (one-shot, set by the LuCI recovery app) still enters
+  recovery directly, without the window.
+- Boards where no status LEDs can be claimed fall back to the legacy
+  single button sample.
+
+**Implementation**: `xr1710g_recovery_button_window()` in
+`board/airoha/an7581/an7581_rfb.c`; LED helpers
+`recovery_status_leds_cue_begin()/poll()/end()` in `net/lwip/httpd_recovery.c`.
+
+### 5. Auto-mode Recovery TX Egress Fallback
+
+**Problem**: with `recovery_port` unset (`auto` / dual-service) the recovery
+always used the internal 1G switch port (fport 1) as the default TX egress,
+even when no 1G port had link. On the W1700K a client attached to the 2.5G LAN
+port (GDM4, fport 4) therefore received nothing - RX worked (DHCP DISCOVER was
+even answered), but every unicast reply (ARP, HTTP) was transmitted into the
+idle switch port, so the recovery page stayed unreachable.
+
+**Fix**: in `airoha_pick_tx_fport()`, when dual-service is enabled and no 1G
+port has link, fall back to the external 10G/2.5G port when it is a candidate.
+The dedicated 1G ports keep priority whenever they have link, so the original
+behaviour is unchanged for XR1710G-style 1G-first setups.
+
+## 中文说明（Fork Changes 中文对照）
+
+### 4. 恢复入口窗口与 LED 提示
+
+**问题**：以前只能"启动时按住 reset"进恢复模式，没有任何视觉提示，用户不知道
+什么时候按、有没有按上；而且 `board_late_init()` 只在耗时的 NAND/UBI 操作之前
+采样一次按键，真正可用的窗口只有几百毫秒。
+
+**设计**：chainloader 在做任何 NAND/UBI 操作之前先开一个看得见的恢复窗口：
+
+1. 状态灯按颜色通道依次跑马灯，每 200 ms 换一个通道（W1700K 是 RGBW 状态灯：
+   红 → 绿 → 蓝 → 白）。
+2. 整个窗口内每 20 ms 采样一次 reset 键（窗口默认 3000 ms，可用
+   `recovery_window_ms` 调整，单位毫秒、十进制）。
+3. 窗口内按一下 reset 就立刻进入网页恢复，**按下瞬间状态灯就变蓝**（此时网页
+   服务还没起来）；空闲时维持常亮蓝，擦写阶段切回扫动进度动画。
+4. 窗口内没按 → 状态灯快速闪 3 次（提示"错过了窗口"），然后继续正常启动。
+
+操作方式：上电 → 看到状态灯开始 RGB 跑马灯 → 按一次 `reset` → 灯变成常亮蓝
+＝ 已进入恢复模式，浏览器打开 `http://192.168.255.1/`。
+
+**其他入口与回退**
+
+- `recovery_trigger`（一次性变量，由 LuCI 恢复插件写入）仍然可以直接进入恢复，
+  不走这个窗口。
+- 采不到状态灯的板子自动回退到原来的"单次采样"行为。
+
+**实现位置**：`xr1710g_recovery_button_window()`
+（`board/airoha/an7581/an7581_rfb.c`）、LED 辅助函数
+`recovery_status_leds_cue_begin()/poll()/end()`（`net/lwip/httpd_recovery.c`）。
+
+### 5. auto 模式恢复发送出口回退
+
+**问题**：`recovery_port` 未设置（auto / dual-service）时，恢复模式总是把内部
+1G 交换机口（fport 1）当作默认发送出口，哪怕 1G 口根本没有链路。W1700K 上如果
+客户端接在 2.5G LAN 口（GDM4，fport 4），收包是正常的（DHCP DISCOVER 都能收到
+并回应），但所有单播回应（ARP、HTTP）都被发进空闲的交换机口，恢复页面因此
+始终打不开。
+
+**修复**：在 `airoha_pick_tx_fport()` 中，dual-service 且 1G 口无链路时，回退到
+外部 10G/2.5G 口（前提是它被判定为候选）。1G 口有链路时仍然优先，所以
+XR1710G 那种"1G 优先"的行为保持不变。
+
 ---
 
 ## Original README
@@ -59,25 +169,32 @@ Use this after the custom U-Boot is installed and you only want to update the
 main OpenWrt firmware.
 
 1. Connect the PC to the 10GbE port and leave the PC NIC in DHCP mode.
-2. Power on the router.
-3. Once the 10GbE port LED starts blinking, press and hold the `reset` button.
-4. If you are unsure about the timing, wait a few more seconds. Because of the
-   chainloader, there is a fairly large timing margin here.
-5. Release the button after the status LED changes from solid red to the
+2. Press and hold the `reset` button, wait a few seconds for the button to
+   settle, and only then apply power (keep holding). This is the reliable way
+   to enter recovery - pressing the button at the exact moment of power-on is
+   timing-sensitive and may leave the vendor first-stage bootloader waiting
+   with all LEDs off.
+3. Release the button after the status LED changes from solid red to the
    flowing recovery pattern.
-6. Open `http://192.168.255.1`.
-7. Select the upload target:
+4. Open `http://192.168.255.1`.
+5. Select the upload target:
    - `firmware` writes the OpenWrt-generated `*-sysupgrade.itb` to `ubi:fit`.
    - `uboot` writes `xr1710g-chainloader-slot.bin` to the raw chainloader slot.
-8. For a firmware upload, select the layout encoded in that image's embedded
+6. For a firmware upload, select the layout encoded in that image's embedded
    device tree: `UBI 2.0`, `UBI 1.5`, or `UBI 1.0`. The selector controls the
    erase/rebuild boundary; it does not convert or patch the uploaded image.
-9. Full rebuild recreates `ubootenv`, `ubootenv2`, `fit`, and `rootfs_data`.
+7. Full rebuild recreates `ubootenv`, `ubootenv2`, `fit`, and `rootfs_data`.
    Factory EEPROM and MAC data are restored from the vendor DSD region, while
    saved U-Boot environment values are reset.
-10. Do not select a layout based only on the currently detected flash layout.
+8. Do not select a layout based only on the currently detected flash layout.
     The selection must match the new image. A mismatch can let U-Boot load the
     kernel but leave Linux waiting indefinitely for `/dev/fit0`.
+
+
+> Alternative timing: power on normally first, wait until the 10GbE port LED
+> starts blinking (the chainloader has handed off to this U-Boot), then press
+> and hold `reset`. This also works; the key is not to press the button at the
+> instant of power-on.
 
 Current HTTP Recovery page with the image-layout selector:
 

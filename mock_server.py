@@ -8,7 +8,7 @@ import urllib.parse
 
 HTDOCS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib', 'lwip', 'httpd', 'htdocs')
 
-MOCK_UBOOT_VERSION = "U-Boot XR1710G-2026-8-10-gfc5d785865fb (Aug 10 2026 - local preview)"
+MOCK_UBOOT_VERSION = "U-Boot AN7581-2026-8-10-gfc5d785865fb (Aug 10 2026 - local preview)"
 MOCK_RECOVERY_VERSION = "2026-8-8"
 MOCK_CREDIT = "Thanks to YYH2913"
 MOCK_DETECTED_LAYOUT = "2.0"
@@ -233,7 +233,7 @@ class RecoveryHandler(http.server.BaseHTTPRequestHandler):
 def main():
     port = 8080
     server = http.server.HTTPServer(('127.0.0.1', port), RecoveryHandler)
-    print(f"XR1710G Recovery Mock Server running at http://127.0.0.1:{port}")
+    print(f"AN7581 Recovery Mock Server running at http://127.0.0.1:{port}")
     print(f"  - GET  /about    -> version info")
     print(f"  - GET  /status   -> progress status")
     print(f"  - POST /upload/firmware?layout=2.0")

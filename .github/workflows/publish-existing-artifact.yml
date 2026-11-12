@@ -5,6 +5,14 @@ run-name: Publish run ${{ inputs.run_id }} as ${{ inputs.release_type }}
 on:
   workflow_dispatch:
     inputs:
+      board:
+        description: Target board (must match the artifact being published)
+        required: true
+        default: w1700k
+        type: choice
+        options:
+          - w1700k
+          - xr1710g
       run_id:
         description: Actions run ID containing a successful Build U-Boot job
         required: true
@@ -42,6 +50,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_RUN_ID: ${{ inputs.run_id }}
+          BOARD: ${{ inputs.board }}
         run: |
           if ! [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
             echo "Run ID must be a positive integer: $SOURCE_RUN_ID" >&2
@@ -84,12 +93,12 @@ jobs:
             gh api "${RUN_API}/artifacts?per_page=100" --jq '
               .artifacts[] |
               select(.expired == false) |
-              select(.name | test("^xr1710g-uboot-[0-9]{8}-[0-9a-f]{12}$")) |
+              select(.name | test("^" + env.BOARD + "-uboot-[0-9]{8}-[0-9a-f]{12}$")) |
               [.id, .name] | @tsv
             '
           )
           if [ "${#ARTIFACTS[@]}" -ne 1 ]; then
-            echo "Expected one unexpired XR1710G build Artifact, found ${#ARTIFACTS[@]}" >&2
+            echo "Expected one unexpired ${BOARD} build Artifact, found ${#ARTIFACTS[@]}" >&2
             printf 'Matching Artifacts: %s\n' "${ARTIFACTS[*]:-none}" >&2
             exit 1
           fi
@@ -166,12 +175,12 @@ jobs:
           done
 
           COMMIT_SHORT=${COMMIT_FULL:0:12}
-          if [[ "$SLOT_NAME" != xr1710g-uboot-*-"$COMMIT_SHORT"-flash-slot.bin ]]; then
+          if [[ "$SLOT_NAME" != "$BOARD-uboot-"*-"$COMMIT_SHORT"-flash-slot.bin ]]; then
             echo "Unexpected flash slot filename: $SLOT_NAME" >&2
             exit 1
           fi
 
-          SLOT_STEM=${SLOT_NAME#xr1710g-uboot-}
+          SLOT_STEM=${SLOT_NAME#"$BOARD"-uboot-}
           SLOT_STEM=${SLOT_STEM%-flash-slot.bin}
           RELEASE_DATE=${SLOT_STEM%-"$COMMIT_SHORT"}
           if ! [[ "$RELEASE_DATE" =~ ^[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}$ ]]; then
@@ -180,14 +189,14 @@ jobs:
           fi
 
           COMPACT_DATE=$(date -u -d "$RELEASE_DATE" +%Y%m%d)
-          EXPECTED_ARTIFACT="xr1710g-uboot-${COMPACT_DATE}-${COMMIT_SHORT}"
+          EXPECTED_ARTIFACT="${BOARD}-uboot-${COMPACT_DATE}-${COMMIT_SHORT}"
           if [ "$SOURCE_ARTIFACT_NAME" != "$EXPECTED_ARTIFACT" ]; then
             echo "Artifact name does not match its build metadata: $SOURCE_ARTIFACT_NAME" >&2
             echo "Expected: $EXPECTED_ARTIFACT" >&2
             exit 1
           fi
 
-          EXPECTED_FIT="xr1710g-uboot-${RELEASE_DATE}-${COMMIT_SHORT}-chainloader.itb"
+          EXPECTED_FIT="${BOARD}-uboot-${RELEASE_DATE}-${COMMIT_SHORT}-chainloader.itb"
           if [ "$FIT_NAME" != "$EXPECTED_FIT" ]; then
             echo "Unexpected chainloader FIT filename: $FIT_NAME" >&2
             echo "Expected: $EXPECTED_FIT" >&2
@@ -261,7 +270,7 @@ jobs:
           HAS_RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN != '' }}
           RELEASE_MODE: ${{ inputs.release_type }}
           RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
-          RELEASE_TITLE: XR1710G U-Boot-${{ steps.metadata.outputs.release_date }}-g${{ steps.metadata.outputs.commit_short }}
+          RELEASE_TITLE: ${{ inputs.board }} U-Boot-${{ steps.metadata.outputs.release_date }}-g${{ steps.metadata.outputs.commit_short }}
           SLOT_NAME: ${{ steps.metadata.outputs.slot_name }}
           FIT_NAME: ${{ steps.metadata.outputs.fit_name }}
           ARTIFACT_DIR: ${{ steps.metadata.outputs.artifact_dir }}

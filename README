@@ -1,8 +1,8 @@
-XR1710G Notes:
-==============
+W1700K / AN7581 Notes:
+======================
 
-Project-specific usage and flashing notes for the XR1710G port live in
-README.md in this directory.
+Project-specific usage and flashing notes live in README.md in this
+directory. The tree also keeps Brightspeed XR1710G board support.
 
 The remainder of this file is the upstream U-Boot README.
 

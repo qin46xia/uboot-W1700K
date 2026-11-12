@@ -372,7 +372,7 @@ include $(srctree)/scripts/Makefile.compiler
 
 # Read UBOOTRELEASE from include/config/uboot.release (if it exists)
 UBOOTRELEASE = $(shell cat include/config/uboot.release 2> /dev/null)
-UBOOTVERSION = XR1710G
+UBOOTVERSION = AN7581
 export VERSION PATCHLEVEL SUBLEVEL UBOOTRELEASE UBOOTVERSION
 
 # Modified for U-Boot

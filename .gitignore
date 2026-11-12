@@ -145,6 +145,6 @@ __pycache__
 # Clang's compilation database file
 /compile_commands.json
 
-# XR1710G chainloader packaging assets
+# chainloader packaging assets
 !chainloader/
 !chainloader/**
